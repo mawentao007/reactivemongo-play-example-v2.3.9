@@ -9,7 +9,7 @@ import play.api.mvc._
 import play.api.libs.concurrent.Execution.Implicits.defaultContext
 import play.modules.reactivemongo.{ MongoController, ReactiveMongoPlugin }
 
-import reactivemongo.api.gridfs.GridFS
+import reactivemongo.api.gridfs.{BasicMetadata, ReadFile, GridFS}
 import reactivemongo.api.gridfs.Implicits.DefaultReadFileReader
 import reactivemongo.api.collections.default.BSONCollection
 import reactivemongo.bson._
@@ -72,7 +72,7 @@ object Articles extends Controller with MongoController {
         // find(...).toList returns a future list of documents (here, a future list of ReadFileEntry)
         gridFS.find(BSONDocument("article" -> article.id.get)).collect[List]().map { files =>
           val filesWithId = files.map { file =>
-            file.id.asInstanceOf[BSONObjectID].stringify -> file
+            file.id.asInstanceOf[BSONObjectID].stringify -> file.asInstanceOf[ReadFile[BSONValue]]
           }
           Ok(views.html.editArticle(Some(id), Article.form.fill(article), Some(filesWithId)))
         }
@@ -115,7 +115,10 @@ object Articles extends Controller with MongoController {
     gridFS.find(BSONDocument("article" -> BSONObjectID(id))).collect[List]().flatMap { files =>
       // for each attachment, delete their chunks and then their file entry
       val deletions = files.map { file =>
-        gridFS.remove(file)
+        //Logger.info(" " + file.id)
+        /*gridFS.remove(file.id.asInstanceOf[BSONValue])  第一种情况，删除元文件id*/
+        //第二种情况，参数为整个BSONValue的元数据
+        gridFS.remove(file.asInstanceOf[BasicMetadata[BSONValue]])
       }
       Future.sequence(deletions)
     }.flatMap { _ =>
@@ -125,15 +128,20 @@ object Articles extends Controller with MongoController {
   }
 
   // save the uploaded file as an attachment of the article with the given id
+  //bodyparser that will save a file sent with multipart/form-data into the given GridFS store.
   def saveAttachment(id: String) = Action.async(gridFSBodyParser(gridFS)) { request =>
     // here is the future file!
-    val futureFile = request.body.files.head.ref
+ //   val futureFile:Future[[ReadFile[BSONValue]]] = request.body.files.head.ref
+    //将数据存入gridfs，同时返回存储后的元数据
+    val futureFile: Future[ReadFile[BSONValue]] = request.body.files.head.ref
     // when the upload is complete, we add the article id to the file entry (in order to find the attachments of the article)
     val futureUpdate = for {
       file <- futureFile
       // here, the file is completely uploaded, so it is time to update the article
       updateResult <- {
-        gridFS.files.update(
+        //从元数据集合中找到相应的文件的元数据并更新
+        //Genericcollection有update方法，BSONCollection继承了这个trait。
+        gridFS.files.asInstanceOf[BSONCollection].update(
           BSONDocument("_id" -> file.id),
           BSONDocument("$set" -> BSONDocument("article" -> BSONObjectID(id))))
       }
